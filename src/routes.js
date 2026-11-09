@@ -180,3 +180,97 @@ crud('/quick-replies', 'quick_replies', ['title', 'body']);
 crud('/qa-rules', 'qa_rules', ['keyword', 'answer']);
 crud('/flows', 'flows', ['trigger', 'action', 'reply_text']);
 crud('/products', 'products', ['name', 'price', 'image_url', 'description']);
+router.get('/welcome', j((req, res) => {
+  const w = db.prepare('SELECT * FROM welcome WHERE id=1').get() || { enabled: 1, message: '', steps: '[]' };
+  res.json({ ...w, steps: JSON.parse(w.steps || '[]') });
+}));
+router.put('/welcome', j((req, res) => {
+  const { enabled = true, message = '', steps = [] } = req.body || {};
+  db.prepare('INSERT OR REPLACE INTO welcome (id, enabled, message, steps) VALUES (1,?,?,?)')
+    .run(enabled ? 1 : 0, message, JSON.stringify(steps));
+  log('welcome.update', message.slice(0, 60));
+  res.json({ ok: true });
+}));
+
+/* ---------- Campaigns ---------- */
+function campaignCounts(id) {
+  const rows = db.prepare('SELECT status, COUNT(*) c FROM campaign_recipients WHERE campaign_id=? GROUP BY status').all(id);
+  const counts = { total: 0, sent: 0, delivered: 0, read: 0, failed: 0, queued: 0 };
+  for (const r of rows) { counts.total += r.c; if (counts[r.status] !== undefined) counts[r.status] = r.c; }
+  counts.delivered += counts.read; counts.sent += counts.delivered; // cumulative like BotLinkd cards
+  return counts;
+}
+
+router.get('/campaigns', j((req, res) => {
+  const rows = db.prepare('SELECT * FROM campaigns ORDER BY id DESC').all();
+  res.json(rows.map((c) => ({ ...c, counts: campaignCounts(c.id) })));
+}));
+router.post('/campaigns', j((req, res) => {
+  const { name, group_id, template_id, scheduled_at = '', mode } = req.body || {};
+  if (!name || !group_id || !template_id) return res.status(400).json({ error: 'name, group_id, template_id required' });
+  const m = mode || (cfg.metaConnected ? 'live' : 'simulate');
+  const status = scheduled_at ? 'scheduled' : 'draft';
+  const info = db.prepare('INSERT INTO campaigns (name, group_id, template_id, status, scheduled_at, mode) VALUES (?,?,?,?,?,?)')
+    .run(name, group_id, template_id, status, scheduled_at, m);
+  log('campaign.create', `${name} (${m})`);
+  res.json({ id: Number(info.lastInsertRowid) });
+}));
+router.get('/campaigns/:id', j((req, res) => {
+  const c = db.prepare('SELECT * FROM campaigns WHERE id=?').get(req.params.id);
+  if (!c) return res.status(404).json({ error: 'not found' });
+  const recipients = db.prepare(
+    `SELECT cr.*, cu.name FROM campaign_recipients cr LEFT JOIN customers cu ON cu.id=cr.customer_id WHERE cr.campaign_id=? ORDER BY cr.id`
+  ).all(c.id);
+  res.json({ ...c, counts: campaignCounts(c.id), recipients });
+}));
+
+async function executeCampaign(camp) {
+  const members = db.prepare('SELECT c.* FROM customers c JOIN group_members gm ON gm.customer_id=c.id WHERE gm.group_id=?').all(camp.group_id);
+  const tpl = db.prepare('SELECT * FROM templates WHERE id=?').get(camp.template_id);
+  db.prepare('DELETE FROM campaign_recipients WHERE campaign_id=?').run(camp.id);
+  const ins = db.prepare('INSERT INTO campaign_recipients (campaign_id, customer_id, phone, status) VALUES (?,?,?,?)');
+  const recs = members.map((m) => ({ id: Number(ins.run(camp.id, m.id, m.phone, 'queued').lastInsertRowid), phone: m.phone }));
+  const simulate = camp.mode === 'simulate' || !cfg.metaConnected;
+  db.prepare("UPDATE campaigns SET status='running' WHERE id=?").run(camp.id);
+  log('campaign.run', `${camp.name} -> ${recs.length} recipients (${simulate ? 'SIMULATE' : 'LIVE'})`);
+  if (simulate) {
+    // Walk statuses locally so the UI demonstrates delivery flow without Meta credentials.
+    recs.forEach((r, i) => {
+      const fail = i % 7 === 6;
+      setTimeout(() => db.prepare("UPDATE campaign_recipients SET status='sent', updated_at=datetime('now') WHERE id=?").run(r.id), 300 + i * 250);
+      setTimeout(() => { if (!fail) db.prepare("UPDATE campaign_recipients SET status='delivered', updated_at=datetime('now') WHERE id=?").run(r.id); }, 900 + i * 250);
+      setTimeout(() => {
+        db.prepare("UPDATE campaign_recipients SET status=?, updated_at=datetime('now') WHERE id=?").run(fail ? 'failed' : 'read', r.id);
+        if (i === recs.length - 1) {
+          db.prepare("UPDATE campaigns SET status='simulated-completed' WHERE id=?").run(camp.id);
+          log('campaign.done', `${camp.name} simulated complete`);
+        }
+      }, 1500 + i * 250);
+    });
+    if (!recs.length) db.prepare("UPDATE campaigns SET status='simulated-completed' WHERE id=?").run(camp.id);
+    return { mode: 'simulate', recipients: recs.length };
+  }
+  let sent = 0, failed = 0;
+  for (const r of recs) {
+    try {
+      const out = await meta.sendTemplate(r.phone, tpl.name, tpl.language);
+      const waId = out.messages && out.messages[0] ? out.messages[0].id : '';
+      db.prepare("UPDATE campaign_recipients SET status='sent', wa_id=?, updated_at=datetime('now') WHERE id=?").run(waId, r.id);
+      sent++;
+    } catch (e) {
+      db.prepare("UPDATE campaign_recipients SET status='failed', updated_at=datetime('now') WHERE id=?").run(r.id);
+      failed++;
+    }
+  }
+  db.prepare("UPDATE campaigns SET status='completed' WHERE id=?").run(camp.id);
+  log('campaign.done', `${camp.name}: ${sent} sent, ${failed} failed`);
+  return { mode: 'live', sent, failed };
+}
+router.post('/campaigns/:id/run', ja(async (req, res) => {
+  const camp = db.prepare('SELECT * FROM campaigns WHERE id=?').get(req.params.id);
+  if (!camp) return res.status(404).json({ error: 'not found' });
+  const result = await executeCampaign(camp);
+  res.json({ ok: true, ...result });
+}));
+
+module.exports = { router, executeCampaign };
