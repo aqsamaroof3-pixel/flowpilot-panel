@@ -232,3 +232,105 @@ ${rows.map((r) => `<tr><td>${esc(r.name)}</td><td>${esc(r.language)}</td><td>${e
   $('#tSync').addEventListener('click', async () => { try { const r = await post('/templates/sync'); toast('Synced ' + r.synced + ' templates'); render(); } catch (e) { toast(e.message); } });
   view.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', async () => { await del('/templates/' + b.dataset.del); render(); }));
 }
+
+async function vWelcome() {
+  const w = await api('/welcome');
+  view.innerHTML = `<div class="panel"><h3>Welcome Sequence</h3>
+<label class="inline"><input type="checkbox" class="switch" id="wEnabled" ${w.enabled ? 'checked' : ''}> Enabled — sent to every new conversation</label>
+<textarea id="wMsg" style="margin-top:10px">${esc(w.message)}</textarea>
+<input id="wSteps" placeholder="Steps (comma separated)" value="${esc((w.steps || []).join(', '))}" style="margin-top:8px">
+<div style="margin-top:10px"><button id="wSave">Save</button></div></div>`;
+  $('#wSave').addEventListener('click', async () => {
+    await put('/welcome', { enabled: $('#wEnabled').checked, message: $('#wMsg').value, steps: $('#wSteps').value.split(',').map((s) => s.trim()).filter(Boolean) });
+    toast('Welcome sequence saved');
+  });
+}
+
+async function vAutoReplies() {
+  const [convs, rules] = await Promise.all([api('/conversations'), api('/qa-rules')]);
+  view.innerHTML = `
+<div class="panel"><h3>How Auto Reply works</h3><p class="muted">When a chat's Auto Reply is ON: QA rules answer first — Chat Flows — Groq AI (if GROQ_API_KEY set) — polite default line. Replies send via Cloud API when connected, otherwise they are stored as <b>pending</b> in the chat.</p></div>
+<div class="panel"><h3>Active QA rules (${rules.length})</h3><table><tr><th>Keyword</th><th>Answer</th></tr>
+${rules.map((r) => `<tr><td>${esc(r.keyword)}</td><td>${esc(r.answer)}</td></tr>`).join('')}</table></div>
+<div class="panel"><h3>Per-chat Auto Reply</h3><table><tr><th>Customer</th><th>Phone</th><th>Auto Reply</th></tr>
+${convs.map((c) => `<tr><td>${esc(c.name)}</td><td>${esc(c.phone)}</td><td><input type="checkbox" class="switch" data-ar="${c.id}" ${c.auto_reply ? 'checked' : ''}></td></tr>`).join('')}</table></div>`;
+  view.querySelectorAll('[data-ar]').forEach((el) => el.addEventListener('change', async () => { await patch('/conversations/' + el.dataset.ar, { auto_reply: el.checked }); toast('Updated'); }));
+}
+
+async function vProfile() {
+  const s = await api('/settings');
+  const saved = JSON.parse(localStorage.getItem('bizProfile') || '{}');
+  view.innerHTML = `
+<div class="panel"><h3>Business Profile</h3>
+<div class="form-grid">
+<input id="bName" placeholder="Business name" value="${esc(saved.name || 'FlowPilot AI')}">
+<input id="bPhone" placeholder="Display phone" value="${esc(saved.phone || '')}">
+<input id="bAddr" placeholder="Address" value="${esc(saved.address || 'Okara, Punjab, Pakistan')}">
+</div>
+<button id="bSave">Save (stored locally)</button>
+<p class="muted" style="margin-top:10px">WhatsApp connection: ${s.metaConnected ? '<b style="color:#0a7d44">Connected via Cloud API</b>' : '<b style="color:#9a6a00">Test Mode — connect the Meta test number in Settings/.env to go live.</b>'}</p></div>`;
+  $('#bSave').addEventListener('click', () => { localStorage.setItem('bizProfile', JSON.stringify({ name: $('#bName').value, phone: $('#bPhone').value, address: $('#bAddr').value })); toast('Saved'); });
+}
+async function vSettings() {
+  const s = await api('/settings');
+  const st = Object.fromEntries((s.meta || []).map((m) => [m.name, m]));
+  const setPill = (name) => st[name] && st[name].present
+    ? `<span class="pill green">set${st[name].source ? ' (' + esc(st[name].source) + ')' : ''}</span>`
+    : '<span class="pill red">not set</span>';
+  view.innerHTML = `
+<div class="panel"><h3>Connect Meta — WhatsApp Cloud API</h3>
+<p class="muted">Paste the credentials from your Meta App Dashboard (WhatsApp&gt;API Setup). The TEST number's token works.</p>
+<p class="muted">Values are stored <b>on the server only</b> and are never shown again — this page displays set / not set status only.</p>
+<p class="muted">Leave a field blank and save to keep it unchanged; type <b>CLEAR</b> in a field to remove a saved value.</p>
+<div class="form-grid" style="margin-top:10px">
+<label>Meta Access Token ${setPill('META_ACCESS_TOKEN')}<br>
+<input id="mToken" type="password" autocomplete="off" placeholder="Paste access token (not shown after saving)"></label>
+<label>WhatsApp Phone Number ID ${setPill('WA_PHONE_NUMBER_ID')}<br>
+<input id="mPhoneId" type="text" autocomplete="off" placeholder="e.g. phone_number_id of the test number"></label>
+<label>WhatsApp Business Account ID ${setPill('WA_BUSINESS_ACCOUNT_ID')}<br>
+<input id="mWabaId" type="text" autocomplete="off" placeholder="WABA id (needed for template sync)"></label>
+</div>
+<button id="mSave">Save Meta credentials</button>
+<span id="mState" class="muted" style="margin-left:10px">${s.metaConnected ? 'Status: CONNECTED' : 'Status: not connected yet'}</span>
+</div>
+<div class="panel"><h3>Settings — configuration status (names only, values never shown)</h3>
+<table><tr><th>Key</th><th>Status</th></tr>
+${s.env.map((e) => `<tr><td>${esc(e.name)}</td><td>${e.present ? '<span class="pill green">present</span>' : '<span class="pill red">missing</span>'}</td></tr>`).join('')}
+</table>
+<p class="muted" style="margin-top:10px">Meta Cloud API: ${s.metaConnected ? 'CONNECTED' : 'NOT CONNECTED'} • Groq AI: ${s.groqConnected ? 'CONNECTED' : 'not set (rule-based replies only)'} • Port: ${s.port}</p>
+<p class="muted">Webhook URL for Meta App Dashboard: <b>&lt;your-public-url&gt;/webhook</b> — the verify token must match WEBHOOK_VERIFY_TOKEN set on the server (ask your admin if you did not set it).</p></div>`;
+  $('#mSave').addEventListener('click', async () => {
+    const payload = {};
+    const map = { META_ACCESS_TOKEN: '#mToken', WA_PHONE_NUMBER_ID: '#mPhoneId', WA_BUSINESS_ACCOUNT_ID: '#mWabaId' };
+    for (const [key, sel] of Object.entries(map)) {
+      const v = $(sel).value.trim();
+      if (v === 'CLEAR') payload[key] = '';
+      else if (v) payload[key] = v;
+    }
+    if (!Object.keys(payload).length) { toast('Nothing to save — paste at least one value'); return; }
+    const r = await post('/settings/meta', payload);
+    toast(r.metaConnected ? 'Saved — Meta CONNECTED' : 'Saved');
+    render();
+  });
+}
+
+async function vLogs() {
+  const rows = await api('/logs');
+  view.innerHTML = `<div class="panel"><h3>Activity Logs</h3><table><tr><th>Time</th><th>Event</th><th>Detail</th></tr>
+${rows.map((r) => `<tr><td>${esc(r.created_at)}</td><td>${esc(r.event)}</td><td>${esc(r.detail)}</td></tr>`).join('')}</table></div>`;
+}
+
+const VIEWS = {
+  dashboard: vDashboard, chats: vChats, campaigns: vCampaigns, templates: vTemplates,
+  quick: crudView({ title: 'Quick Replies', listPath: '/quick-replies', fields: [{ key: 'title', label: 'Title' }, { key: 'body', label: 'Message body' }], cols: [{ key: 'title', label: 'Title' }, { key: 'body', label: 'Body' }], createLabel: 'Add Quick Reply' }),
+  qa: crudView({ title: 'QA Reply rules', listPath: '/qa-rules', fields: [{ key: 'keyword', label: 'Keyword (message contains)' }, { key: 'answer', label: 'Answer' }], cols: [{ key: 'keyword', label: 'Keyword' }, { key: 'answer', label: 'Answer' }], createLabel: 'Add QA Rule' }),
+  flows: crudView({ title: 'Chat Flows', listPath: '/flows', fields: [{ key: 'trigger', label: 'Trigger keyword' }, { key: 'action', label: 'Action (reply)' }, { key: 'reply_text', label: 'Reply text' }], cols: [{ key: 'trigger', label: 'Trigger' }, { key: 'action', label: 'Action' }, { key: 'reply_text', label: 'Reply' }], createLabel: 'Add Chat Flow' }),
+  products: crudView({ title: 'Catalog & Products', listPath: '/products', fields: [{ key: 'name', label: 'Product name' }, { key: 'price', label: 'Price' }, { key: 'image_url', label: 'Image URL' }, { key: 'description', label: 'Description' }], cols: [{ key: 'name', label: 'Name' }, { key: 'price', label: 'Price' }, { key: 'image_url', label: 'Image URL' }, { key: 'description', label: 'Description' }], createLabel: 'Add Product' }),
+  welcome: vWelcome, autoreplies: vAutoReplies, customers: vCustomers, groups: vGroups,
+  profile: vProfile, settings: vSettings, logs: vLogs,
+};
+async function render() {
+  try { await VIEWS[currentView](); } catch (e) { view.innerHTML = `<div class="panel">Error: ${esc(e.message)}</div>`; }
+}
+
+render();
