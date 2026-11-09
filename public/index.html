@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FlowPilot — WhatsApp Cloud API Panel</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="logo">💬 FLOW<span>PILOT</span></div>
+      <nav id="nav">
+        <a data-view="dashboard" class="active">📊 Dashboard</a>
+        <div class="nav-head">AUTOMATION</div>
+        <a data-view="flows">🔀 Chat Flows</a>
+        <a data-view="qa">❓ QA Reply</a>
+        <a data-view="welcome">👋 Welcome Sequence</a>
+        <div class="nav-head">WHATSAPP MODULE</div>
+        <a data-view="chats">💬 Chats<span id="unreadBadge" class="badge hidden">0</span></a>
+        <a data-view="campaigns">📣 Campaigns</a>
+        <a data-view="templates">📄 Templates</a>
+        <a data-view="quick">⚡ Quick Replies</a>
+        <a data-view="autoreplies">🤖 Auto Replies</a>
+        <a data-view="customers">👥 Customers</a>
+        <a data-view="groups">👨‍👩‍👧 Groups</a>
+        <a data-view="profile">🏢 Business Profile</a>
+        <div class="nav-head">COMMERCE</div>
+        <a data-view="products">🛍️ Catalog &amp; Products</a>
+        <div class="nav-head">SYSTEM</div>
+        <a data-view="settings">⚙️ Settings</a>
+        <a data-view="logs">📜 Activity Logs</a>
+      </nav>
+      <div class="side-foot" id="connStatus">…</div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <h1 id="pageTitle">Dashboard</h1>
+        <div class="top-right"><span class="tz">Asia/Karachi</span><span class="avatar">AM</span></div>
+      </header>
+      <section id="view"></section>
+    </main>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
