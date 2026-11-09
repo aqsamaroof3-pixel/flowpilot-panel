@@ -95,3 +95,88 @@ router.delete('/groups/:id', j((req, res) => {
   db.prepare('DELETE FROM groups_tbl WHERE id=?').run(req.params.id);
   res.json({ ok: true });
 }));
+router.get('/groups/:id/members', j((req, res) => {
+  res.json(db.prepare('SELECT c.* FROM customers c JOIN group_members gm ON gm.customer_id=c.id WHERE gm.group_id=?').all(req.params.id));
+}));
+router.put('/groups/:id/members', j((req, res) => {
+  const ids = (req.body && req.body.customerIds) || [];
+  db.prepare('DELETE FROM group_members WHERE group_id=?').run(req.params.id);
+  const ins = db.prepare('INSERT INTO group_members (group_id, customer_id) VALUES (?,?)');
+  ids.forEach((id) => ins.run(req.params.id, id));
+  res.json({ ok: true, members: ids.length });
+}));
+
+/* ---------- Conversations / Inbox ---------- */
+router.get('/conversations', j((req, res) => {
+  res.json(db.prepare(
+    `SELECT conv.*, c.name, c.phone FROM conversations conv JOIN customers c ON c.id=conv.customer_id ORDER BY conv.last_at DESC`
+  ).all());
+}));
+router.get('/conversations/:id/messages', j((req, res) => {
+  db.prepare('UPDATE conversations SET unread=0 WHERE id=?').run(req.params.id);
+  res.json(db.prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY id ASC').all(req.params.id));
+}));
+router.patch('/conversations/:id', j((req, res) => {
+  const { auto_reply, solved, label, assigned_to } = req.body || {};
+  const conv = db.prepare('SELECT * FROM conversations WHERE id=?').get(req.params.id);
+  if (!conv) return res.status(404).json({ error: 'not found' });
+  db.prepare('UPDATE conversations SET auto_reply=?, solved=?, label=?, assigned_to=? WHERE id=?')
+    .run(auto_reply !== undefined ? (auto_reply ? 1 : 0) : conv.auto_reply,
+      solved !== undefined ? (solved ? 1 : 0) : conv.solved,
+      label !== undefined ? label : conv.label,
+      assigned_to !== undefined ? assigned_to : conv.assigned_to,
+      req.params.id);
+  res.json({ ok: true });
+}));
+router.post('/conversations/:id/send', ja(async (req, res) => {
+  const body = (req.body && req.body.body) || '';
+  if (!body) return res.status(400).json({ error: 'body required' });
+  const conv = db.prepare('SELECT conv.*, c.phone FROM conversations conv JOIN customers c ON c.id=conv.customer_id WHERE conv.id=?').get(req.params.id);
+  if (!conv) return res.status(404).json({ error: 'conversation not found' });
+  let status = 'pending', waId = '';
+  if (cfg.metaConnected) {
+    const out = await meta.sendText(conv.phone, body);
+    status = 'sent'; waId = out.messages && out.messages[0] ? out.messages[0].id : '';
+  }
+  const id = addMessage(conv.id, 'out', body, { status, waId, origin: 'human' });
+  log('message.send', `conv ${conv.id} (${status})`);
+  res.json({ id, status });
+}));
+
+/* ---------- Templates ---------- */
+router.get('/templates', j((req, res) => res.json(db.prepare('SELECT * FROM templates ORDER BY id DESC').all())));
+router.post('/templates', j((req, res) => {
+  const { name, language = 'en_US', category = 'MARKETING', body = '' } = req.body || {};
+  if (!name) return res.status(400).json({ error: 'name required' });
+  const info = db.prepare('INSERT INTO templates (name, language, category, body) VALUES (?,?,?,?)').run(name, language, category, body);
+  res.json({ id: Number(info.lastInsertRowid) });
+}));
+router.delete('/templates/:id', j((req, res) => { db.prepare('DELETE FROM templates WHERE id=?').run(req.params.id); res.json({ ok: true }); }));
+router.post('/templates/sync', ja(async (req, res) => {
+  const list = await meta.listTemplates();
+  const ins = db.prepare(`INSERT INTO templates (name, language, category, status, body, source) VALUES (?,?,?,?,?, 'meta')
+ON CONFLICT(name) DO UPDATE SET status=excluded.status, language=excluded.language, category=excluded.category, source='meta'`);
+  let n = 0;
+  for (const t of list) {
+    const bodyComp = (t.components || []).find((c) => c.type === 'BODY');
+    ins.run(t.name, t.language || 'en_US', t.category || '', t.status || '', bodyComp ? bodyComp.text || '' : '');
+    n++;
+  }
+  log('template.sync', `${n} templates from Meta`);
+  res.json({ synced: n });
+}));
+
+/* ---------- Quick replies / QA / Flows / Welcome / Products ---------- */
+const crud = (route, table, fields) => {
+  router.get(route, j((req, res) => res.json(db.prepare(`SELECT * FROM ${table} ORDER BY id DESC`).all())));
+  router.post(route, j((req, res) => {
+    const vals = fields.map((f) => (req.body || {})[f] ?? '');
+    const info = db.prepare(`INSERT INTO ${table} (${fields.join(',')}) VALUES (${fields.map(() => '?').join(',')})`).run(...vals);
+    res.json({ id: Number(info.lastInsertRowid) });
+  }));
+  router.delete(route + '/:id', j((req, res) => { db.prepare(`DELETE FROM ${table} WHERE id=?`).run(req.params.id); res.json({ ok: true }); }));
+};
+crud('/quick-replies', 'quick_replies', ['title', 'body']);
+crud('/qa-rules', 'qa_rules', ['keyword', 'answer']);
+crud('/flows', 'flows', ['trigger', 'action', 'reply_text']);
+crud('/products', 'products', ['name', 'price', 'image_url', 'description']);
